@@ -1,0 +1,32 @@
+#! /bin/sh
+# Set proper variables to allow easy "make" building of a NetBSD subtree.
+# Generated from:  $NetBSD: build.sh,v 1.273 2013/08/30 10:29:06 pooka Exp $
+# with these arguments: -j 5 -m i386 -O ./obj.i386 -D ./obj.i386/dest.i386 -U -u distribution
+#
+
+# LSC We are cross compiling, so do not install to root!
+BSHELL='/bin/sh'; export BSHELL
+BUILDSEED='MINIX-3.3.0'; export BUILDSEED
+CONFIG_SHELL='/bin/sh'; export CONFIG_SHELL
+DESTDIR='/home/arthur/coding/minix/./obj.i386/dest.i386'; export DESTDIR
+HOST_SH='/bin/sh'; export HOST_SH
+LC_ALL='C'; export LC_ALL
+MACHINE='i386'; export MACHINE
+MACHINE_ARCH='i386'; export MACHINE_ARCH
+MAKEFLAGS='-de -m /home/arthur/coding/minix/share/mk MKOBJDIRS=yes'; export MAKEFLAGS
+MAKEOBJDIR='${.CURDIR:C,^/home/arthur/coding/minix,/home/arthur/coding/minix/./obj.i386,}'; export MAKEOBJDIR
+MAKEWRAPPERMACHINE=i386; export MAKEWRAPPERMACHINE
+MKARZERO='yes'; export MKARZERO
+MKINSTALLBOOT=no; export MKINSTALLBOOT
+MKUNPRIVED='yes'; export MKUNPRIVED
+MKUPDATE='yes'; export MKUPDATE
+NETBSDSRCDIR='/home/arthur/coding/minix'; export NETBSDSRCDIR
+RELEASEDIR='/home/arthur/coding/minix/./obj.i386/releasedir'; export RELEASEDIR
+TOOLDIR='/home/arthur/coding/minix/./obj.i386/tooldir.Linux-3.16.0-4-amd64-x86_64'; export TOOLDIR
+USETOOLS=yes; export USETOOLS
+unset INFODIR
+unset LESSCHARSET
+unset MAKEOBJDIRPREFIX
+unset TERMINFO
+
+exec "${TOOLDIR}/bin/nbmake" ${1+"$@"}
