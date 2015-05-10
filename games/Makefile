@@ -8,12 +8,12 @@
 .include <bsd.own.mk>
 
 SUBDIR=	adventure arithmetic \
-	bcd \
-	colorbars \
+	banner bcd \
+	colorbars caesar \
 	factor fish fortune \
 	monop morse number \
 	pig ppt primes \
-	random rogue snake tetris \
+	rain random rogue snake tetris \
 	wargames
 
 .if !defined(__MINIX)
