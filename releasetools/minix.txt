@@ -7,3 +7,5 @@ Makefile
 releasetools
 .gitignore
 .gitreview
+LICENSE
+Makefile.inc
