@@ -7,16 +7,13 @@
 # MINIX src
 : ${SRC=`pwd`}
 
-# Checkout Date
-: ${DATE=`date -u "+ %F 12:00:00 UTC"`}
-
 # Whitelists
 : ${WHITELISTS=$SRC/releasetools/whitelist}
 
 # Patches
 : ${PATCHES=$SRC/releasetools/patches}
 cd $NETBSD
-./netbsd-cvs.sh update -A -Pd -D $DATE
+./netbsd-cvs.sh update -A -Pd
 
 for list in `ls $WHITELISTS`
 do
