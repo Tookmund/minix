@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generate patches based on latest source tree
-# Assumes source tree is already setup at $NETBSD
+# Assumes source tree is already setup and updated at $NETBSD
 # MINIX NetBSD source import
 : ${NETBSD=`pwd`/../netbsd}
 
@@ -12,15 +12,14 @@
 
 # Patches
 : ${PATCHES=$SRC/releasetools/patches}
-cd $NETBSD
-./netbsd-cvs.sh update -A -Pd
 
 for list in `ls $WHITELISTS`
 do
-	for item in `cat $SRC/$list`
+	for item in `cat $WHITELISTS/$list`
 	do
 		mkdir -p $PATCHES/$list
-		diff -u $NETBSD/$list/$item $SRC/$list/$item > $PATCHES/$list/$item.patch
+		echo $list/$item
+		diff -ur $NETBSD/$list/$item $SRC/$list/$item > $PATCHES/$list/$item.patch
 	done
 done
 
