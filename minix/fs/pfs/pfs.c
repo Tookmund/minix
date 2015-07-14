@@ -3,6 +3,7 @@
 #include <minix/drivers.h>
 #include <minix/fsdriver.h>
 #include <minix/vfsif.h>
+#include <minix/rs.h>
 #include <assert.h>
 
 /*
@@ -337,7 +338,6 @@ pfs_stat(ino_t ino_nr, struct stat * statbuf)
 
 	/* Fill the stat buffer. */
 	statbuf->st_dev = rip->i_rdev;	/* workaround for old socketpair bug */
-	statbuf->st_ino = rip->i_num;
 	statbuf->st_mode = rip->i_mode;
 	statbuf->st_nlink = 0;
 	statbuf->st_uid = rip->i_uid;
@@ -386,6 +386,20 @@ pfs_signal(int signo)
 }
 
 /*
+ * Initialize PFS.
+ */
+static int
+pfs_init(int __unused type, sef_init_info_t * __unused info)
+{
+
+	/* Drop privileges. */
+	if (setuid(SERVICE_UID) != 0)
+		printf("PFS: warning, unable to drop privileges\n");
+
+	return OK;
+}
+
+/*
  * Perform SEF initialization.
  */
 static void
@@ -393,7 +407,7 @@ pfs_startup(void)
 {
 
 	/* Register initialization callbacks. */
-	sef_setcb_init_fresh(sef_cb_init_null);
+	sef_setcb_init_fresh(pfs_init);
 	sef_setcb_init_restart(sef_cb_init_fail);
 
 	/* No live update support for now. */

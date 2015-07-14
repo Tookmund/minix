@@ -3,6 +3,8 @@
 #include <minix/ds.h>
 #include <sys/mman.h>
 
+static int fsdriver_vmcache;	/* have we used the VM cache? */
+
 /*
  * Process a READSUPER request from VFS.
  */
@@ -59,6 +61,7 @@ fsdriver_readsuper(const struct fsdriver * __restrict fdp,
 		fsdriver_mounted = TRUE;
 		fsdriver_device = dev;
 		fsdriver_root = root_node.fn_ino_nr;
+		fsdriver_vmcache = FALSE;
 	}
 
 	return r;
@@ -77,7 +80,7 @@ fsdriver_unmount(const struct fsdriver * __restrict fdp,
 		fdp->fdr_unmount();
 
 	/* If we used mmap emulation, clear any cached blocks from VM. */
-	if (fdp->fdr_peek == NULL && major(fsdriver_device) == NONE_MAJOR)
+	if (fsdriver_vmcache)
 		vm_clear_cache(fsdriver_device);
 
 	/* Update library-local state. */
@@ -99,15 +102,15 @@ fsdriver_putnode(const struct fsdriver * __restrict fdp,
 	ino_nr = m_in->m_vfs_fs_putnode.inode;
 	count = m_in->m_vfs_fs_putnode.count;
 
-	if (fdp->fdr_putnode == NULL)
-		return ENOSYS;
-
 	if (count == 0 || count > INT_MAX) {
 		printf("fsdriver: invalid reference count\n");
 		return EINVAL;
 	}
 
-	return fdp->fdr_putnode(ino_nr, count);
+	if (fdp->fdr_putnode != NULL)
+		return fdp->fdr_putnode(ino_nr, count);
+	else
+		return OK;
 }
 
 /*
@@ -256,6 +259,8 @@ builtin_peek(const struct fsdriver * __restrict fdp, ino_t ino_nr,
 		    pos, &flags, nbytes, VMSF_ONCE);
 
 		if (r == OK) {
+			fsdriver_vmcache = TRUE;
+
 			dev_off += nbytes;
 
 			r = nbytes;
@@ -726,6 +731,7 @@ fsdriver_stat(const struct fsdriver * __restrict fdp,
 
 	memset(&buf, 0, sizeof(buf));
 	buf.st_dev = fsdriver_device;
+	buf.st_ino = ino_nr;
 
 	if ((r = fdp->fdr_stat(ino_nr, &buf)) == OK)
 		r = sys_safecopyto(m_in->m_source, grant, 0, (vir_bytes)&buf,
