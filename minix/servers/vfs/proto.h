@@ -138,7 +138,7 @@ void unmount_all(int force);
 /* open.c */
 int do_close(void);
 int close_fd(struct fproc *rfp, int fd_nr);
-int common_open(char path[PATH_MAX], int oflags, mode_t omode);
+int common_open(char path[PATH_MAX], int oflags, mode_t omode, int for_exec);
 int do_creat(void);
 int do_lseek(void);
 int do_mknod(void);
@@ -247,6 +247,27 @@ int req_utime(endpoint_t fs_e, ino_t inode_nr, struct timespec * actv,
 	struct timespec * modtv);
 int req_newdriver(endpoint_t fs_e, dev_t dev, char *label);
 
+/* socket.c */
+int do_socket(void);
+int do_socketpair(void);
+int do_bind(void);
+int do_connect(void);
+int do_listen(void);
+int do_accept(void);
+void resume_accept(struct fproc *rfp, int status, dev_t dev,
+	unsigned int addr_len, int listen_fd);
+int do_sendto(void);
+int do_recvfrom(void);
+void resume_recvfrom(struct fproc *rfp, int status, unsigned int addr_len);
+int do_sockmsg(void);
+void resume_recvmsg(struct fproc *rfp, int status, unsigned int ctl_len,
+	unsigned int addr_len, int flags, vir_bytes msg_buf);
+int do_setsockopt(void);
+int do_getsockopt(void);
+int do_getsockname(void);
+int do_getpeername(void);
+int do_shutdown(void);
+
 /* stadir.c */
 int do_chdir(void);
 int do_fchdir(void);
@@ -335,6 +356,8 @@ void select_unsuspend_by_endpt(endpoint_t proc);
 
 /* worker.c */
 void worker_init(void);
+void worker_cleanup(void);
+int worker_idle(void);
 int worker_available(void);
 void worker_allow(int allow);
 struct worker_thread *worker_get(thread_t worker_tid);
@@ -344,6 +367,7 @@ void worker_start(struct fproc *rfp, void (*func)(void), message *m_ptr,
 	int use_spare);
 void worker_stop(struct worker_thread *worker);
 void worker_stop_by_endpt(endpoint_t proc_e);
+void worker_yield(void);
 void worker_wait(void);
 struct worker_thread *worker_suspend(void);
 void worker_resume(struct worker_thread *org_self);

@@ -41,10 +41,11 @@ int
 dowriteblock(int b, int blocksize, u32_t seed, char *data)
 {
 	struct buf *bp;
+	int r;
 
 	assert(blocksize == curblocksize);
 
-	if(!(bp = lmfs_get_block(MYDEV, b, NORMAL))) {
+	if ((r = lmfs_get_block(&bp, MYDEV, b, NORMAL)) != 0) {
 		e(30);
 		return 0;
 	}
@@ -53,7 +54,7 @@ dowriteblock(int b, int blocksize, u32_t seed, char *data)
 
 	lmfs_markdirty(bp);
 
-	lmfs_put_block(bp, FULL_DATA_BLOCK);
+	lmfs_put_block(bp);
 
 	return blocksize;
 }
@@ -62,17 +63,18 @@ int
 readblock(int b, int blocksize, u32_t seed, char *data)
 {
 	struct buf *bp;
+	int r;
 
 	assert(blocksize == curblocksize);
 
-	if(!(bp = lmfs_get_block(MYDEV, b, NORMAL))) {
+	if ((r = lmfs_get_block(&bp, MYDEV, b, NORMAL)) != 0) {
 		e(30);
 		return 0;
 	}
 
 	memcpy(data, bp->data, blocksize);
 
-	lmfs_put_block(bp, FULL_DATA_BLOCK);
+	lmfs_put_block(bp);
 
 	return blocksize;
 }
@@ -89,12 +91,6 @@ void testend(void)
 }
 
 /* Fake some libminixfs client functions */
-
-void
-fs_blockstats(u64_t *total, u64_t *free, u64_t *used)
-{
-	*total = *free = *used = 0;
-}
 
 static void allocate(int b)
 {
@@ -241,6 +237,11 @@ void *vm_map_cacheblock(dev_t dev, off_t dev_offset,
 	return MAP_FAILED;
 }
 
+int vm_forget_cacheblock(dev_t dev, off_t dev_offset, int blocksize)
+{
+	return 0;
+}
+
 int vm_clear_cache(dev_t dev)
 {
 	return 0;
@@ -264,7 +265,7 @@ main(int argc, char *argv[])
 	for(p = 1; p <= 3; p++) {
 		/* Do not update curblocksize until the cache is flushed. */
 		newblocksize = PAGE_SIZE*p;
-		lmfs_set_blocksize(newblocksize, MYMAJOR);
+		lmfs_set_blocksize(newblocksize);
 		curblocksize = newblocksize;	/* now it's safe to update */
 		lmfs_buf_pool(BLOCKS);
 		if(dotest(curblocksize, BLOCKS, ITER)) e(n);
@@ -277,7 +278,7 @@ main(int argc, char *argv[])
 	for(wss = 2; wss <= 3; wss++) {
 		int wsblocks = 10*wss*wss*wss*wss*wss;
 		for(cs = wsblocks/4; cs <= wsblocks*3; cs *= 1.5) {
-			lmfs_set_blocksize(PAGE_SIZE, MYMAJOR);
+			lmfs_set_blocksize(PAGE_SIZE);
 			curblocksize = PAGE_SIZE;	/* same as above */
 			lmfs_buf_pool(cs);
 		        if(dotest(curblocksize, wsblocks, ITER)) e(n);

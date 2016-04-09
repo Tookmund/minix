@@ -80,6 +80,7 @@ void ip_init()
 		ip_port->ip_dl_type= icp->ic_devtype;
 		ip_port->ip_mtu= IP_DEF_MTU;
 		ip_port->ip_mtu_max= IP_MAX_PACKSIZE;
+		memset(&ip_port->ip_dl, 0, sizeof(ip_port->ip_dl));
 
 		switch(ip_port->ip_dl_type)
 		{
@@ -206,7 +207,7 @@ unsigned operations;
 	}
 	if (operations & SR_SELECT_EXCEPTION)
 	{
-		printf("ip_select: not implemented for exceptions\n");
+		/* Nothing */
 	}
 	return resops;
 }

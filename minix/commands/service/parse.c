@@ -23,13 +23,13 @@
 #include <minix/paths.h>
 #include <minix/sef.h>
 #include <minix/dmap.h>
+#include <minix/priv.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <configfile.h>
 
 #include <machine/archtypes.h>
 #include <minix/timers.h>
-#include "kernel/proc.h"
 
 #include "config.h"
 #include "proto.h"
@@ -741,18 +741,18 @@ struct
 	{ "GETPHYS",		VM_GETPHYS },
 	{ "GETREF",		VM_GETREF },
 	{ "RS_SET_PRIV",	VM_RS_SET_PRIV },
-	{ "QUERY_EXIT",		VM_QUERY_EXIT },
-	{ "WATCH_EXIT",		VM_WATCH_EXIT },
-	{ "NOTIFY_SIG",		VM_NOTIFY_SIG },
 	{ "INFO",		VM_INFO },
 	{ "RS_UPDATE",		VM_RS_UPDATE },
 	{ "RS_MEMCTL",		VM_RS_MEMCTL },
 	{ "PROCCTL",		VM_PROCCTL },
 	{ "MAPCACHEPAGE",	VM_MAPCACHEPAGE },
 	{ "SETCACHEPAGE",	VM_SETCACHEPAGE },
+	{ "FORGETCACHEPAGE",	VM_FORGETCACHEPAGE },
 	{ "CLEARCACHE",		VM_CLEARCACHE },
 	{ "VFS_MMAP",		VM_VFS_MMAP },
 	{ "VFS_REPLY",		VM_VFS_REPLY },
+	{ "GETRUSAGE",		VM_GETRUSAGE },
+	{ "RS_PREPARE",		VM_RS_PREPARE },
 	{ NULL,			0 },
 };
 

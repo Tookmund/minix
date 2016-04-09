@@ -10,7 +10,8 @@
  *   o  it must initialize this library in order to set up a buffer pool for
  *      use by these functions, using the lmfs_buf_pool function; the
  *      recommended number of blocks for *non*-disk-backed file systems is
- *      NR_IOREQS buffers (disk-backed file systems typically use many more);
+ *      LMFS_MAX_PREFETCH buffers (disk-backed file systems typically use many
+ *      more);
  *   o  it must enable VM caching in order to support memory mapping of block
  *      devices, using the lmfs_may_use_vmcache function;
  *   o  it must either use lmfs_flushall as implementation for the fdr_sync
@@ -32,7 +33,11 @@
 #include <minix/libminixfs.h>
 #include <minix/fsdriver.h>
 #include <minix/bdev.h>
+#include <minix/partition.h>
+#include <sys/ioctl.h>
 #include <assert.h>
+
+#include "inc.h"
 
 /*
  * Set the driver label of the device identified by 'dev' to 'label'.  While
@@ -49,6 +54,7 @@ lmfs_driver(dev_t dev, char *label)
 
 /*
  * Prefetch up to "nblocks" blocks on "dev" starting from block number "block".
+ * The size to be used for the last block in the range is given as "last_size".
  * Stop early when either the I/O request fills up or when a block is already
  * found to be in the cache.  The latter is likely to happen often, since this
  * function is called before getting each block for reading.  Prefetching is a
@@ -56,26 +62,40 @@ lmfs_driver(dev_t dev, char *label)
  * TODO: limit according to the number of available buffers.
  */
 static void
-block_prefetch(dev_t dev, block_t block, block_t nblocks)
+block_prefetch(dev_t dev, block64_t block, unsigned int nblocks,
+	size_t block_size, size_t last_size)
 {
-	struct buf *bp, *bufs[NR_IOREQS];
-	unsigned int count;
+	struct buf *bp;
+	unsigned int count, limit;
+	int r;
+
+	limit = lmfs_readahead_limit();
+	assert(limit >= 1 && limit <= LMFS_MAX_PREFETCH);
+
+	if (nblocks > limit) {
+		nblocks = limit;
+
+		last_size = block_size;
+	}
 
 	for (count = 0; count < nblocks; count++) {
-		bp = lmfs_get_block(dev, block + count, PREFETCH);
-		assert(bp != NULL);
+		if (count == nblocks - 1 && last_size < block_size)
+			r = lmfs_get_partial_block(&bp, dev, block + count,
+			    PEEK, last_size);
+		else
+			r = lmfs_get_block(&bp, dev, block + count, PEEK);
 
-		if (lmfs_dev(bp) != NO_DEV) {
-			lmfs_put_block(bp, FULL_DATA_BLOCK);
+		if (r == OK) {
+			lmfs_put_block(bp);
+
+			last_size = block_size;
 
 			break;
 		}
-
-		bufs[count] = bp;
 	}
 
 	if (count > 0)
-		lmfs_rw_scattered(dev, bufs, count, READING);
+		lmfs_readahead(dev, block, count, last_size);
 }
 
 /*
@@ -90,71 +110,104 @@ block_prefetch(dev_t dev, block_t block, block_t nblocks)
  * flushed immediately, and thus, a successful write only indicates that the
  * data have been taken in by the cache (for immediate I/O, a character device
  * would have to be used, but MINIX3 no longer supports this), which may be
- * follwed later by silent failures, including undetected end-of-file cases.
- * In particular, write requests may or may not return 0 (EOF) immediately when
- * writing at or beyond the block device's size. i Since block I/O takes place
- * at block granularity, block-unaligned writes have to read a block from disk
- * before updating it, and that is the only possible source of actual I/O
- * errors for write calls.
- * TODO: reconsider the buffering-only approach, or see if we can at least
- * somehow throw accurate EOF errors without reading in each block first.
+ * follwed later by silent failures.  End-of-file conditions are always
+ * reported immediately, though.
  */
 ssize_t
 lmfs_bio(dev_t dev, struct fsdriver_data * data, size_t bytes, off_t pos,
 	int call)
 {
-	block_t block, blocks_left;
-	size_t block_size, off, block_off, chunk;
+	block64_t block;
+	struct part_geom part;
+	size_t block_size, off, block_off, last_size, size, chunk;
+	unsigned int blocks_left;
 	struct buf *bp;
-	int r, write, how;
+	int r, do_write, how;
 
 	if (dev == NO_DEV)
 		return EINVAL;
 
 	block_size = lmfs_fs_block_size();
-	write = (call == FSC_WRITE);
+	do_write = (call == FSC_WRITE);
 
 	assert(block_size > 0);
 
-	/* FIXME: block_t is 32-bit, so we have to impose a limit here. */
-	if (pos < 0 || pos / block_size > UINT32_MAX || bytes > SSIZE_MAX)
+	if (bytes == 0)
+		return 0; /* just in case */
+
+	if (pos < 0 || bytes > SSIZE_MAX || pos > INT64_MAX - bytes + 1)
 		return EINVAL;
+
+	/*
+	 * Get the partition size, so that we can handle EOF ourselves.
+	 * Unfortunately, we cannot cache the results between calls, since we
+	 * do not get to see DIOCSETP ioctls--see also repartition(8).
+	 */
+	if ((r = bdev_ioctl(dev, DIOCGETP, &part, NONE /*user_endpt*/)) != OK)
+		return r;
+
+	if ((uint64_t)pos >= part.size)
+		return 0; /* EOF */
+
+	if ((uint64_t)pos > part.size - bytes)
+		bytes = part.size - pos;
 
 	off = 0;
 	block = pos / block_size;
 	block_off = (size_t)(pos % block_size);
 	blocks_left = howmany(block_off + bytes, block_size);
 
-	lmfs_reset_rdwt_err();
+	assert(blocks_left > 0);
+
+	/*
+	 * If the last block we need is also the last block of the device,
+	 * see how many bytes we should actually transfer for that block.
+	 */
+	if (block + blocks_left - 1 == part.size / block_size)
+		last_size = part.size % block_size;
+	else
+		last_size = block_size;
+
 	r = OK;
 
-	for (off = 0; off < bytes; off += chunk) {
-		chunk = block_size - block_off;
+	for (off = 0; off < bytes && blocks_left > 0; off += chunk) {
+		size = (blocks_left == 1) ? last_size : block_size;
+
+		chunk = size - block_off;
 		if (chunk > bytes - off)
 			chunk = bytes - off;
+
+		assert(chunk > 0 && chunk <= size);
 
 		/*
 		 * For read requests, help the block driver form larger I/O
 		 * requests.
 		 */
-		if (!write)
-			block_prefetch(dev, block, blocks_left);
+		if (!do_write)
+			block_prefetch(dev, block, blocks_left, block_size,
+			    last_size);
 
 		/*
 		 * Do not read the block from disk if we will end up
 		 * overwriting all of its contents.
 		 */
-		how = (write && chunk == block_size) ? NO_READ : NORMAL;
+		how = (do_write && chunk == size) ? NO_READ : NORMAL;
 
-		bp = lmfs_get_block(dev, block, how);
-		assert(bp);
+		if (size < block_size)
+			r = lmfs_get_partial_block(&bp, dev, block, how, size);
+		else
+			r = lmfs_get_block(&bp, dev, block, how);
 
-		r = lmfs_rdwt_err();
+		if (r != OK) {
+			printf("libminixfs: error getting block <%"PRIx64","
+			    "%"PRIu64"> for device I/O (%d)\n", dev, block, r);
 
+			break;
+		}
+
+		/* Perform the actual copy. */
 		if (r == OK && data != NULL) {
-			assert(lmfs_dev(bp) != NO_DEV);
-
-			if (write) {
+			if (do_write) {
 				r = fsdriver_copyin(data, off,
 				    (char *)bp->data + block_off, chunk);
 
@@ -172,7 +225,7 @@ lmfs_bio(dev_t dev, struct fsdriver_data * data, size_t bytes, off_t pos,
 				    (char *)bp->data + block_off, chunk);
 		}
 
-		lmfs_put_block(bp, FULL_DATA_BLOCK);
+		lmfs_put_block(bp);
 
 		if (r != OK)
 			break;
@@ -183,12 +236,11 @@ lmfs_bio(dev_t dev, struct fsdriver_data * data, size_t bytes, off_t pos,
 	}
 
 	/*
-	 * If we were not able to do any I/O, return the error (or EOF, even
-	 * for writes).  Otherwise, return how many bytes we did manage to
-	 * transfer.
+	 * If we were not able to do any I/O, return the error.  Otherwise,
+	 * return how many bytes we did manage to transfer.
 	 */
 	if (r != OK && off == 0)
-		return (r == END_OF_FILE) ? 0 : r;
+		return r;
 
 	return off;
 }

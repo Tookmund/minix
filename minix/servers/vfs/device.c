@@ -27,7 +27,6 @@
 #include <minix/ioctl.h>
 #include <minix/u64.h>
 #include "file.h"
-#include "scratchpad.h"
 #include "dmap.h"
 #include <minix/vfsif.h>
 #include "vnode.h"
@@ -289,8 +288,9 @@ int cdev_io(
   /* Handle TIOCSCTTY ioctl: set controlling tty.
    * TODO: cleaner implementation work in progress.
    */
-  if (op == CDEV_IOCTL && bytes == TIOCSCTTY && major(dev) == TTY_MAJOR) {
-       fp->fp_tty = dev;
+  if (op == CDEV_IOCTL && bytes == TIOCSCTTY &&
+     (major(dev) == TTY_MAJOR || major(dev) == PTY_MAJOR)) {
+	fp->fp_tty = dev;
   }
 
   /* Create a grant for the buffer provided by the user process. */
@@ -357,9 +357,9 @@ static int cdev_clone(dev_t dev, devminor_t new_minor)
   }
   lock_vnode(vp, VNODE_OPCL);
 
-  assert(fp->fp_filp[scratch(fp).file.fd_nr] != NULL);
-  unlock_vnode(fp->fp_filp[scratch(fp).file.fd_nr]->filp_vno);
-  put_vnode(fp->fp_filp[scratch(fp).file.fd_nr]->filp_vno);
+  assert(fp->fp_filp[fp->fp_fd] != NULL);
+  unlock_vnode(fp->fp_filp[fp->fp_fd]->filp_vno);
+  put_vnode(fp->fp_filp[fp->fp_fd]->filp_vno);
 
   vp->v_fs_e = res.fs_e;
   vp->v_vmnt = NULL;
@@ -370,7 +370,7 @@ static int cdev_clone(dev_t dev, devminor_t new_minor)
   vp->v_sdev = dev;
   vp->v_fs_count = 1;
   vp->v_ref_count = 1;
-  fp->fp_filp[scratch(fp).file.fd_nr]->filp_vno = vp;
+  fp->fp_filp[fp->fp_fd]->filp_vno = vp;
 
   return OK;
 }
@@ -446,7 +446,7 @@ static int cdev_opcl(
   worker_wait();
 
   self->w_task = NONE;
-  self->w_drv_sendrec = NULL;
+  assert(self->w_drv_sendrec == NULL);
 
   /* Process the reply. */
   r = dev_mess.m_lchardriver_vfs_reply.status;
@@ -513,11 +513,11 @@ int do_ioctl(void)
   dev_t dev;
   vir_bytes argx;
 
-  scratch(fp).file.fd_nr = job_m_in.m_lc_vfs_ioctl.fd;
+  fp->fp_fd = job_m_in.m_lc_vfs_ioctl.fd;
   ioctlrequest = job_m_in.m_lc_vfs_ioctl.req;
   argx = (vir_bytes)job_m_in.m_lc_vfs_ioctl.arg;
 
-  if ((f = get_filp(scratch(fp).file.fd_nr, VNODE_READ)) == NULL)
+  if ((f = get_filp(fp->fp_fd, VNODE_READ)) == NULL)
 	return(err_code);
   vp = f->filp_vno;		/* get vnode pointer */
   if (!S_ISCHR(vp->v_mode) && !S_ISBLK(vp->v_mode)) {
@@ -614,7 +614,7 @@ int cdev_cancel(dev_t dev)
   worker_wait();
 
   self->w_task = NONE;
-  self->w_drv_sendrec = NULL;
+  assert(self->w_drv_sendrec == NULL);
 
   /* Clean up and return the result (note: the request may have completed). */
   if (GRANT_VALID(fp->fp_grant)) {
@@ -766,9 +766,10 @@ static void cdev_generic_reply(message *m_ptr)
   }
   rfp = &fproc[slot];
   wp = rfp->fp_worker;
-  if (wp != NULL && wp->w_task == who_e) {
+  if (wp != NULL && wp->w_task == who_e && wp->w_drv_sendrec != NULL) {
 	assert(!fp_is_blocked(rfp));
 	*wp->w_drv_sendrec = *m_ptr;
+	wp->w_drv_sendrec = NULL;
 	worker_signal(wp);	/* Continue open/close/cancel */
   } else if (rfp->fp_blocked_on != FP_BLOCKED_ON_OTHER ||
 		rfp->fp_task != m_ptr->m_source) {
@@ -841,12 +842,11 @@ void bdev_reply(void)
   }
 
   wp = worker_get(dp->dmap_servicing);
-  if (wp == NULL || wp->w_task != who_e) {
+  if (wp == NULL || wp->w_task != who_e || wp->w_drv_sendrec == NULL) {
 	printf("VFS: no worker thread waiting for a reply from %d\n", who_e);
 	return;
   }
 
-  assert(wp->w_drv_sendrec != NULL);
   *wp->w_drv_sendrec = m_in;
   wp->w_drv_sendrec = NULL;
   worker_signal(wp);

@@ -26,7 +26,6 @@
 #include <minix/debug.h>
 #include <minix/vfsif.h>
 #include "file.h"
-#include "scratchpad.h"
 #include "vmnt.h"
 #include "vnode.h"
 
@@ -48,6 +47,7 @@ static int unblock(struct fproc *rfp);
 /* SEF functions and variables. */
 static void sef_local_startup(void);
 static int sef_cb_init_fresh(int type, sef_init_info_t *info);
+static int sef_cb_init_lu(int type, sef_init_info_t *info);
 
 /*===========================================================================*
  *				main					     *
@@ -66,13 +66,10 @@ int main(void)
 
   printf("Started VFS: %d worker thread(s)\n", NR_WTHREADS);
 
-  if (OK != (sys_getkinfo(&kinfo)))
-	panic("couldn't get kernel kinfo");
-
   /* This is the main loop that gets work, processes it, and sends replies. */
   while (TRUE) {
-	yield_all();	/* let other threads run */
-	self = NULL;
+	worker_yield();	/* let other threads run */
+
 	send_work();
 
 	/* The get_work() function returns TRUE if we have a new message to
@@ -195,8 +192,17 @@ static void do_reply(struct worker_thread *wp)
   if (wp->w_task != who_e) {
 	printf("VFS: tid %d: expected %d to reply, not %d\n",
 		wp->w_tid, wp->w_task, who_e);
+	return;
+  }
+  /* It should be impossible to trigger the following case, but it is here for
+   * consistency reasons: worker_stop() resets w_sendrec but not w_task.
+   */
+  if (wp->w_sendrec == NULL) {
+	printf("VFS: tid %d: late reply from %d ignored\n", wp->w_tid, who_e);
+	return;
   }
   *wp->w_sendrec = m_in;
+  wp->w_sendrec = NULL;
   wp->w_task = NONE;
   if(vmp) vmp->m_comm.c_cur_reqs--; /* We've got our reply, make room for others */
   worker_signal(wp); /* Continue this thread */
@@ -211,15 +217,14 @@ static void do_pending_pipe(void)
   struct filp *f;
   tll_access_t locktype;
 
-  f = scratch(fp).file.filp;
+  f = fp->fp_filp[fp->fp_fd];
   assert(f != NULL);
-  scratch(fp).file.filp = NULL;
 
   locktype = (job_call_nr == VFS_READ) ? VNODE_READ : VNODE_WRITE;
   op = (job_call_nr == VFS_READ) ? READING : WRITING;
   lock_filp(f, locktype);
 
-  r = rw_pipe(op, who_e, f, scratch(fp).io.io_buffer, scratch(fp).io.io_nbytes);
+  r = rw_pipe(op, who_e, f, fp->fp_io_buffer, fp->fp_io_nbytes);
 
   if (r != SUSPEND) { /* Do we have results to report? */
 	/* Process is writing, but there is no reader. Send a SIGPIPE signal.
@@ -277,15 +282,90 @@ static void do_work(void)
 }
 
 /*===========================================================================*
+ *				sef_cb_lu_prepare			     *
+ *===========================================================================*/
+static int sef_cb_lu_prepare(int state)
+{
+/* This function is called to decide whether we can enter the given live
+ * update state, and to prepare for such an update. If we are requested to
+ * update to a request-free or protocol-free state, make sure there is no work
+ * pending or being processed, and shut down all worker threads.
+ */
+
+  switch (state) {
+  case SEF_LU_STATE_REQUEST_FREE:
+  case SEF_LU_STATE_PROTOCOL_FREE:
+	if (!worker_idle()) {
+		printf("VFS: worker threads not idle, blocking update\n");
+		break;
+	}
+
+	worker_cleanup();
+
+	return OK;
+  }
+
+  return ENOTREADY;
+}
+
+/*===========================================================================*
+ *			       sef_cb_lu_state_changed			     *
+ *===========================================================================*/
+static void sef_cb_lu_state_changed(int old_state, int state)
+{
+/* Worker threads (especially their stacks) pose a serious problem for state
+ * transfer during live update, and therefore, we shut down all worker threads
+ * during live update and restart them afterwards. This function is called in
+ * the old VFS instance when the state changed. We use it to restart worker
+ * threads after a failed live update.
+ */
+
+  if (state != SEF_LU_STATE_NULL)
+	return;
+
+  switch (old_state) {
+  case SEF_LU_STATE_REQUEST_FREE:
+  case SEF_LU_STATE_PROTOCOL_FREE:
+	worker_init();
+  }
+}
+
+/*===========================================================================*
+ *				sef_cb_init_lu				     *
+ *===========================================================================*/
+static int sef_cb_init_lu(int type, sef_init_info_t *info)
+{
+/* This function is called in the new VFS instance during a live update. */
+  int r;
+
+  /* Perform regular state transfer. */
+  if ((r = SEF_CB_INIT_LU_DEFAULT(type, info)) != OK)
+	return r;
+
+  /* Recreate worker threads, if necessary. */
+  switch (info->prepare_state) {
+  case SEF_LU_STATE_REQUEST_FREE:
+  case SEF_LU_STATE_PROTOCOL_FREE:
+	worker_init();
+  }
+
+  return OK;
+}
+
+/*===========================================================================*
  *			       sef_local_startup			     *
  *===========================================================================*/
-static void sef_local_startup()
+static void sef_local_startup(void)
 {
   /* Register init callbacks. */
   sef_setcb_init_fresh(sef_cb_init_fresh);
-  sef_setcb_init_restart(sef_cb_init_fail);
+  sef_setcb_init_restart(SEF_CB_INIT_RESTART_STATEFUL);
 
-  /* No live update support for now. */
+  /* Register live update callbacks. */
+  sef_setcb_init_lu(sef_cb_init_lu);
+  sef_setcb_lu_prepare(sef_cb_lu_prepare);
+  sef_setcb_lu_state_changed(sef_cb_lu_state_changed);
+  sef_setcb_lu_state_isvalid(sef_cb_lu_state_isvalid_standard);
 
   /* Let SEF perform startup. */
   sef_startup();
@@ -622,6 +702,14 @@ void service_pm_postponed(void)
 	term_signal = job_m_in.VFS_PM_TERM_SIG;
 	core_path = (vir_bytes) job_m_in.VFS_PM_PATH;
 
+	/* A zero signal used to indicate that a coredump should be generated
+	 * without terminating the target process, but this was broken in so
+	 * many ways that we no longer support this. Userland should implement
+	 * this functionality itself, for example through ptrace(2).
+	 */
+	if (term_signal == 0)
+		panic("no termination signal given for coredump!");
+
 	assert(proc_e == fp->fp_endpoint);
 
 	r = pm_dumpcore(term_signal, core_path);
@@ -834,15 +922,15 @@ struct fproc *rfp;
   case VFS_READ:
   case VFS_WRITE:
 	assert(blocked_on == FP_BLOCKED_ON_PIPE);
-	m_in.m_lc_vfs_readwrite.fd = scratch(rfp).file.fd_nr;
-	m_in.m_lc_vfs_readwrite.buf = scratch(rfp).io.io_buffer;
-	m_in.m_lc_vfs_readwrite.len = scratch(rfp).io.io_nbytes;
+	m_in.m_lc_vfs_readwrite.fd = rfp->fp_fd;
+	m_in.m_lc_vfs_readwrite.buf = rfp->fp_io_buffer;
+	m_in.m_lc_vfs_readwrite.len = rfp->fp_io_nbytes;
 	break;
   case VFS_FCNTL:
 	assert(blocked_on == FP_BLOCKED_ON_LOCK);
-	m_in.m_lc_vfs_fcntl.fd = scratch(rfp).file.fd_nr;
-	m_in.m_lc_vfs_fcntl.cmd = scratch(rfp).io.io_nbytes;
-	m_in.m_lc_vfs_fcntl.arg_ptr = scratch(rfp).io.io_buffer;
+	m_in.m_lc_vfs_fcntl.fd = rfp->fp_fd;
+	m_in.m_lc_vfs_fcntl.cmd = rfp->fp_io_nbytes;
+	m_in.m_lc_vfs_fcntl.arg_ptr = rfp->fp_io_buffer;
 	assert(m_in.m_lc_vfs_fcntl.cmd == F_SETLKW);
 	break;
   default:

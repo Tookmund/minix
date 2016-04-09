@@ -10,6 +10,7 @@ int call_enter(struct trace_proc *proc, int show_stack);
 void call_leave(struct trace_proc *proc, int skip);
 void call_replay(struct trace_proc *proc);
 const char *call_name(struct trace_proc *proc);
+int call_errno(struct trace_proc *proc, int *err);
 
 /* error.c */
 const char *get_error_name(int err);
@@ -99,16 +100,24 @@ extern int allnames;
 extern unsigned int verbose;
 extern unsigned int valuesonly;
 
-/* vfs.c */
-void put_fd(struct trace_proc *proc, const char *name, int fd);
-void put_dev(struct trace_proc *proc, const char *name, dev_t dev);
-
 /* service */
 const struct calls pm_calls;
 const struct calls vfs_calls;
 const struct calls rs_calls;
+const struct calls mib_calls;
 const struct calls vm_calls;
 const struct calls ipc_calls;
+
+/* service/vfs.c */
+void put_fd(struct trace_proc *proc, const char *name, int fd);
+void put_dev(struct trace_proc *proc, const char *name, dev_t dev);
+void put_in_addr(struct trace_proc *proc, const char *name, struct in_addr in);
+void put_socket_type(struct trace_proc *proc, const char *name, int type);
+void put_socket_family(struct trace_proc *proc, const char *name, int family);
+void put_struct_uucred(struct trace_proc *proc, const char *name, int flags,
+	vir_bytes addr);
+void put_cmsg_type(struct trace_proc *proc, const char *name, int type);
+void put_shutdown_how(struct trace_proc *proc, const char *name, int how);
 
 /* ioctl/block.c */
 const char *block_ioctl_name(unsigned long req);

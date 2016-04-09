@@ -18,7 +18,6 @@
 #include <minix/com.h>
 #include <minix/u64.h>
 #include "file.h"
-#include "scratchpad.h"
 #include "lock.h"
 #include <sys/dirent.h>
 #include <assert.h>
@@ -50,7 +49,7 @@ int do_open(void)
   if (copy_path(fullpath, sizeof(fullpath)) != OK)
 	return(err_code);
 
-  return common_open(fullpath, open_flags, 0 /*omode*/);
+  return common_open(fullpath, open_flags, 0 /*omode*/, FALSE /*for_exec*/);
 }
 
 /*===========================================================================*
@@ -75,13 +74,13 @@ int do_creat(void)
   if (fetch_name(vname, vname_length, fullpath) != OK)
 	return(err_code);
 
-  return common_open(fullpath, open_flags, create_mode);
+  return common_open(fullpath, open_flags, create_mode, FALSE /*for_exec*/);
 }
 
 /*===========================================================================*
  *				common_open				     *
  *===========================================================================*/
-int common_open(char path[PATH_MAX], int oflags, mode_t omode)
+int common_open(char path[PATH_MAX], int oflags, mode_t omode, int for_exec)
 {
 /* Common code from do_creat and do_open. */
   int b, r, exist = TRUE;
@@ -100,8 +99,7 @@ int common_open(char path[PATH_MAX], int oflags, mode_t omode)
   if (!bits) return(EINVAL);
 
   /* See if file descriptor and filp slots are available. */
-  if ((r = get_fd(fp, start, bits, &(scratch(fp).file.fd_nr),
-     &filp)) != OK)
+  if ((r = get_fd(fp, start, bits, &fp->fp_fd, &filp)) != OK)
 	return(r);
 
   lookup_init(&resolve, path, PATH_NOFLAGS, &vmp, &vp);
@@ -132,17 +130,20 @@ int common_open(char path[PATH_MAX], int oflags, mode_t omode)
   }
 
   /* Claim the file descriptor and filp slot and fill them in. */
-  fp->fp_filp[scratch(fp).file.fd_nr] = filp;
+  fp->fp_filp[fp->fp_fd] = filp;
   filp->filp_count = 1;
   filp->filp_vno = vp;
   filp->filp_flags = oflags;
   if (oflags & O_CLOEXEC)
-	FD_SET(scratch(fp).file.fd_nr, &fp->fp_cloexec_set);
+	FD_SET(fp->fp_fd, &fp->fp_cloexec_set);
 
   /* Only do the normal open code if we didn't just create the file. */
   if (exist) {
-	/* Check protections. */
-	if ((r = forbidden(fp, vp, bits)) == OK) {
+	/* Check permissions based on the given open flags, except when we are
+	 * opening an executable for the purpose of passing a file descriptor
+	 * to its interpreter for execution, in which case we check the X bit.
+	 */
+	if ((r = forbidden(fp, vp, for_exec ? X_BIT : bits)) == OK) {
 		/* Opening reg. files, directories, and special files differ */
 		switch (vp->v_mode & S_IFMT) {
 		   case S_IFREG:
@@ -243,7 +244,7 @@ int common_open(char path[PATH_MAX], int oflags, mode_t omode)
 				filp->filp_count = 0; /* don't find self */
 				if ((filp2 = find_filp(vp, b)) != NULL) {
 				    /* Co-reader or writer found. Use it.*/
-				    fp->fp_filp[scratch(fp).file.fd_nr] = filp2;
+				    fp->fp_filp[fp->fp_fd] = filp2;
 				    filp2->filp_count++;
 				    filp2->filp_vno = vp;
 				    filp2->filp_flags = oflags;
@@ -271,13 +272,13 @@ int common_open(char path[PATH_MAX], int oflags, mode_t omode)
   /* If error, release inode. */
   if (r != OK) {
 	if (r != SUSPEND) {
-		fp->fp_filp[scratch(fp).file.fd_nr] = NULL;
+		fp->fp_filp[fp->fp_fd] = NULL;
 		filp->filp_count = 0;
 		filp->filp_vno = NULL;
 		put_vnode(vp);
 	}
   } else {
-	r = scratch(fp).file.fd_nr;
+	r = fp->fp_fd;
   }
 
   return(r);
@@ -644,7 +645,7 @@ int actual_lseek(struct fproc *rfp, int seekfd, int seekwhence, off_t offset,
 int do_lseek(void)
 {
   /* Perform the lseek(2) system call. */
-  off_t newpos;
+  off_t newpos = 0;
   int r;
 
   if ((r = actual_lseek(fp, job_m_in.m_lc_vfs_lseek.fd,

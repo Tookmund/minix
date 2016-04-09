@@ -33,7 +33,6 @@
 #include <sys/svrctl.h>
 #include <sys/resource.h>
 #include "file.h"
-#include "scratchpad.h"
 #include <minix/vfsif.h>
 #include "vnode.h"
 #include "vmnt.h"
@@ -52,6 +51,8 @@ static void free_proc(int flags);
  *===========================================================================*/
 int do_getsysinfo(void)
 {
+  struct fproc *rfp;
+  struct fproc_light *rfpl;
   vir_bytes src_addr, dst_addr;
   size_t len, buf_size;
   int what;
@@ -75,6 +76,17 @@ int do_getsysinfo(void)
     case SI_DMAP_TAB:
 	src_addr = (vir_bytes) dmap;
 	len = sizeof(struct dmap) * NR_DEVICES;
+	break;
+    case SI_PROCLIGHT_TAB:
+	/* Fill the light process table for the MIB service upon request. */
+	rfpl = &fproc_light[0];
+	for (rfp = &fproc[0]; rfp < &fproc[NR_PROCS]; rfp++, rfpl++) {
+		rfpl->fpl_tty = rfp->fp_tty;
+		rfpl->fpl_blocked_on = rfp->fp_blocked_on;
+		rfpl->fpl_task = rfp->fp_task;
+	}
+	src_addr = (vir_bytes) fproc_light;
+	len = sizeof(fproc_light);
 	break;
 #if ENABLE_SYSCALL_STATS
     case SI_CALL_STATS:
@@ -103,24 +115,28 @@ int do_fcntl(void)
   int new_fd, fl, r = OK, fcntl_req, fcntl_argx;
   tll_access_t locktype;
 
-  scratch(fp).file.fd_nr = job_m_in.m_lc_vfs_fcntl.fd;
-  scratch(fp).io.io_buffer = job_m_in.m_lc_vfs_fcntl.arg_ptr;
-  scratch(fp).io.io_nbytes = job_m_in.m_lc_vfs_fcntl.cmd;
+  fp->fp_fd = job_m_in.m_lc_vfs_fcntl.fd;
+  fp->fp_io_buffer = job_m_in.m_lc_vfs_fcntl.arg_ptr;
+  fp->fp_io_nbytes = job_m_in.m_lc_vfs_fcntl.cmd;
   fcntl_req = job_m_in.m_lc_vfs_fcntl.cmd;
   fcntl_argx = job_m_in.m_lc_vfs_fcntl.arg_int;
 
   /* Is the file descriptor valid? */
   locktype = (fcntl_req == F_FREESP) ? VNODE_WRITE : VNODE_READ;
-  if ((f = get_filp(scratch(fp).file.fd_nr, locktype)) == NULL)
+  if ((f = get_filp(fp->fp_fd, locktype)) == NULL)
 	return(err_code);
 
   switch (fcntl_req) {
     case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
 	/* This replaces the old dup() system call. */
 	if (fcntl_argx < 0 || fcntl_argx >= OPEN_MAX) r = EINVAL;
 	else if ((r = get_fd(fp, fcntl_argx, 0, &new_fd, NULL)) == OK) {
 		f->filp_count++;
 		fp->fp_filp[new_fd] = f;
+		assert(!FD_ISSET(new_fd, &fp->fp_cloexec_set));
+		if (fcntl_req == F_DUPFD_CLOEXEC)
+			FD_SET(new_fd, &fp->fp_cloexec_set);
 		r = new_fd;
 	}
 	break;
@@ -128,16 +144,16 @@ int do_fcntl(void)
     case F_GETFD:
 	/* Get close-on-exec flag (FD_CLOEXEC in POSIX Table 6-2). */
 	r = 0;
-	if (FD_ISSET(scratch(fp).file.fd_nr, &fp->fp_cloexec_set))
+	if (FD_ISSET(fp->fp_fd, &fp->fp_cloexec_set))
 		r = FD_CLOEXEC;
 	break;
 
     case F_SETFD:
 	/* Set close-on-exec flag (FD_CLOEXEC in POSIX Table 6-2). */
 	if (fcntl_argx & FD_CLOEXEC)
-		FD_SET(scratch(fp).file.fd_nr, &fp->fp_cloexec_set);
+		FD_SET(fp->fp_fd, &fp->fp_cloexec_set);
 	else
-		FD_CLR(scratch(fp).file.fd_nr, &fp->fp_cloexec_set);
+		FD_CLR(fp->fp_fd, &fp->fp_cloexec_set);
 	break;
 
     case F_GETFL:
@@ -170,7 +186,7 @@ int do_fcntl(void)
 	else if (!(f->filp_mode & W_BIT)) r = EBADF;
 	else {
 		/* Copy flock data from userspace. */
-		r = sys_datacopy_wrapper(who_e, scratch(fp).io.io_buffer,
+		r = sys_datacopy_wrapper(who_e, fp->fp_io_buffer,
 			SELF, (vir_bytes) &flock_arg, sizeof(flock_arg));
 	}
 
@@ -280,9 +296,9 @@ int do_fsync(void)
   dev_t dev;
   int r = OK;
 
-  scratch(fp).file.fd_nr = job_m_in.m_lc_vfs_fsync.fd;
+  fp->fp_fd = job_m_in.m_lc_vfs_fsync.fd;
 
-  if ((rfilp = get_filp(scratch(fp).file.fd_nr, VNODE_READ)) == NULL)
+  if ((rfilp = get_filp(fp->fp_fd, VNODE_READ)) == NULL)
 	return(err_code);
 
   dev = rfilp->filp_vno->v_dev;
@@ -370,7 +386,10 @@ int do_vm_call(void)
 	u32_t length = job_m_in.VFS_VMCALL_LENGTH;
 	int result = OK;
 	int slot;
-	struct fproc *rfp, *vmf;
+	struct fproc *rfp;
+#if !defined(NDEBUG)
+	struct fproc *vmf;
+#endif /* !defined(NDEBUG) */
 	struct filp *f = NULL;
 	int r;
 
@@ -380,7 +399,9 @@ int do_vm_call(void)
 	if(isokendpt(ep, &slot) != OK) rfp = NULL;
 	else rfp = &fproc[slot];
 
+#if !defined(NDEBUG)
 	vmf = fproc_addr(VM_PROC_NR);
+#endif /* !defined(NDEBUG) */
 	assert(fp == vmf);
 	assert(rfp != vmf);
 
@@ -876,36 +897,41 @@ int do_svrctl(void)
  *===========================================================================*/
 int pm_dumpcore(int csig, vir_bytes exe_name)
 {
-  int r = OK, core_fd;
+  int r, core_fd;
   struct filp *f;
   char core_path[PATH_MAX];
   char proc_name[PROC_NAME_LEN];
 
-  /* if a process is blocked, scratch(fp).file.fd_nr holds the fd it's blocked
-   * on. free it up for use by common_open().
+  /* If a process is blocked, fp->fp_fd holds the fd it's blocked on. Free it
+   * up for use by common_open(). This step is the reason we cannot use this
+   * function to generate a core dump of a process while it is still running
+   * (i.e., without terminating it), as it changes the state of the process.
    */
   if (fp_is_blocked(fp))
           unpause();
 
   /* open core file */
   snprintf(core_path, PATH_MAX, "%s.%d", CORE_NAME, fp->fp_pid);
-  core_fd = common_open(core_path, O_WRONLY | O_CREAT | O_TRUNC, CORE_MODE);
-  if (core_fd < 0) { r = core_fd; goto core_exit; }
+  r = core_fd = common_open(core_path, O_WRONLY | O_CREAT | O_TRUNC,
+	CORE_MODE, FALSE /*for_exec*/);
+  if (r < 0) goto core_exit;
 
-  /* get process' name */
-  r = sys_datacopy_wrapper(PM_PROC_NR, exe_name, VFS_PROC_NR, (vir_bytes) proc_name,
-			PROC_NAME_LEN);
+  /* get process name */
+  r = sys_datacopy_wrapper(PM_PROC_NR, exe_name, VFS_PROC_NR,
+	(vir_bytes) proc_name, PROC_NAME_LEN);
   if (r != OK) goto core_exit;
   proc_name[PROC_NAME_LEN - 1] = '\0';
 
-  if ((f = get_filp(core_fd, VNODE_WRITE)) == NULL) { r=EBADF; goto core_exit; }
+  /* write the core dump */
+  f = get_filp(core_fd, VNODE_WRITE);
+  assert(f != NULL);
   write_elf_core_file(f, csig, proc_name);
   unlock_filp(f);
-  (void) close_fd(fp, core_fd);	        /* ignore failure, we're exiting anyway */
 
 core_exit:
-  if(csig)
-	  free_proc(FP_EXITING);
+  /* The core file descriptor will be closed as part of the process exit. */
+  free_proc(FP_EXITING);
+
   return(r);
 }
 
@@ -958,19 +984,10 @@ void panic_hook(void)
  *===========================================================================*/
 int do_getrusage(void)
 {
-	int res;
-	struct rusage r_usage;
-
-	if ((res = sys_datacopy_wrapper(who_e, m_in.m_lc_vfs_rusage.addr, SELF,
-		(vir_bytes) &r_usage, (vir_bytes) sizeof(r_usage))) < 0)
-		return res;
-
-	r_usage.ru_inblock = 0;
-	r_usage.ru_oublock = 0;
-	r_usage.ru_ixrss = fp->text_size;
-	r_usage.ru_idrss = fp->data_size;
-	r_usage.ru_isrss = DEFAULT_STACK_LIMIT;
-
-	return sys_datacopy_wrapper(SELF, (vir_bytes) &r_usage, who_e,
-		m_in.m_lc_vfs_rusage.addr, (phys_bytes) sizeof(r_usage));
+	/* Obsolete vfs_getrusage(2) call from userland. The getrusage call is
+	 * now fully handled by PM, and for any future fields that should be
+	 * supplied by VFS, VFS should be queried by PM rather than by the user
+	 * program directly.  TODO: remove this call after the next release.
+	 */
+	return OK;
 }

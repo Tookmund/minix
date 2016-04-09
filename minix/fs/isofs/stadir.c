@@ -6,7 +6,7 @@ int fs_stat(ino_t ino_nr, struct stat *statbuf)
 {
 	struct inode *rip;
 
-	if ((rip = find_inode(ino_nr)) == NULL)
+	if ((rip = get_inode(ino_nr)) == NULL)
 		return EINVAL;
 
 	*statbuf = rip->i_stat;
@@ -24,10 +24,4 @@ int fs_statvfs(struct statvfs *st)
 	st->f_namemax = NAME_MAX;
 
 	return OK;
-}
-
-void fs_blockstats(u64_t *blocks, u64_t *free, u64_t *used)
-{
-	*used = *blocks = v_pri.volume_space_size_l;
-	*free = 0;
 }

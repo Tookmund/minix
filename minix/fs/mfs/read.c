@@ -6,6 +6,7 @@
 #include "inode.h"
 #include "super.h"
 #include <sys/param.h>
+#include <sys/dirent.h>
 #include <assert.h>
 
 
@@ -43,8 +44,6 @@ ssize_t fs_readwrite(ino_t ino_nr, struct fsdriver_data *data, size_t nrbytes,
   block_size = rip->i_sp->s_block_size;
   f_size = rip->i_size;
 
-  lmfs_reset_rdwt_err();
-
   /* If this is file i/o, check we can write */
   if (call == FSC_WRITE) {
   	  if(rip->i_sp->s_rd_only) 
@@ -79,8 +78,7 @@ ssize_t fs_readwrite(ino_t ino_nr, struct fsdriver_data *data, size_t nrbytes,
 	  r = rw_chunk(rip, ((u64_t)((unsigned long)position)), off, chunk,
 		nrbytes, call, data, cum_io, block_size, &completed);
 
-	  if (r != OK) break;	/* EOF reached */
-	  if (lmfs_rdwt_err() < 0) break;
+	  if (r != OK) break;
 
 	  /* Update counters and pointers. */
 	  nrbytes -= chunk;	/* bytes yet to be read */
@@ -96,9 +94,6 @@ ssize_t fs_readwrite(ino_t ino_nr, struct fsdriver_data *data, size_t nrbytes,
   } 
 
   rip->i_seek = NO_SEEK;
-
-  if (lmfs_rdwt_err() != OK) r = lmfs_rdwt_err(); /* check for disk error */
-  if (lmfs_rdwt_err() == END_OF_FILE) r = OK;
 
   if (r != OK)
 	return r;
@@ -133,8 +128,7 @@ unsigned int block_size;	/* block size of FS operating on */
 int *completed;			/* number of bytes copied */
 {
 /* Read or write (part of) a block. */
-
-  register struct buf *bp = NULL;
+  struct buf *bp = NULL;
   register int r = OK;
   int n;
   block_t b;
@@ -159,8 +153,12 @@ int *completed;			/* number of bytes copied */
 			printf("MFS: fsdriver_zero failed\n");
 		}
 		return r;
+	} else if (call == FSC_PEEK) {
+		/* Peeking a nonexistent block. Report to VM. */
+		lmfs_zero_block_ino(dev, ino, ino_off);
+		return OK;
 	} else {
-		/* Writing to or peeking a nonexistent block.
+		/* Writing to a nonexistent block.
 		 * Create and enter in inode.
 		 */
 		if ((bp = new_block(rip, (off_t) ex64lo(position))) == NULL)
@@ -179,7 +177,8 @@ int *completed;			/* number of bytes copied */
 		n = NO_READ;
 	assert(ino != VMC_NO_INODE);
 	assert(!(ino_off % block_size));
-	bp = lmfs_get_block_ino(dev, b, n, ino, ino_off);
+	if ((r = lmfs_get_block_ino(&bp, dev, b, n, ino, ino_off)) != OK)
+		panic("MFS: error getting block (%llu,%u): %d", dev, b, r);
   }
 
   /* In all cases, bp now points to a valid buffer. */
@@ -199,8 +198,7 @@ int *completed;			/* number of bytes copied */
 	MARKDIRTY(bp);
   }
   
-  n = (off + chunk == block_size ? FULL_DATA_BLOCK : PARTIAL_DATA_BLOCK);
-  put_block(bp, n);
+  put_block(bp);
 
   return(r);
 }
@@ -224,9 +222,9 @@ int opportunistic;		/* if nonzero, only use cache for metadata */
   unsigned int dzones, nr_indirects;
   block_t b;
   unsigned long excess, zone, block_pos;
-  int iomode = NORMAL;
+  int iomode;
 
-  if(opportunistic) iomode = PREFETCH;
+  iomode = opportunistic ? PEEK : NORMAL;
 
   scale = rip->i_sp->s_log_zone_size;	/* for block-zone conversion */
   block_pos = position/rip->i_sp->s_block_size;	/* relative blk # in file */
@@ -260,14 +258,10 @@ int opportunistic;		/* if nonzero, only use cache for metadata */
 	if ((unsigned int) index > rip->i_nindirs)
 		return(NO_BLOCK);	/* Can't go beyond double indirects */
 	bp = get_block(rip->i_dev, b, iomode); /* get double indirect block */
-	if(opportunistic && lmfs_dev(bp) == NO_DEV) {
-		put_block(bp, INDIRECT_BLOCK);
-		return NO_BLOCK;
-	}
-	ASSERT(lmfs_dev(bp) != NO_DEV);
-	ASSERT(lmfs_dev(bp) == rip->i_dev);
+	if (bp == NULL)
+		return NO_BLOCK;		/* peeking failed */
 	z = rd_indir(bp, index);		/* z= zone for single*/
-	put_block(bp, INDIRECT_BLOCK);		/* release double ind block */
+	put_block(bp);				/* release double ind block */
 	excess = excess % nr_indirects;		/* index into single ind blk */
   }
 
@@ -275,12 +269,10 @@ int opportunistic;		/* if nonzero, only use cache for metadata */
   if (z == NO_ZONE) return(NO_BLOCK);
   b = (block_t) z << scale;			/* b is blk # for single ind */
   bp = get_block(rip->i_dev, b, iomode);	/* get single indirect block */
-  if(opportunistic && lmfs_dev(bp) == NO_DEV) {
-	put_block(bp, INDIRECT_BLOCK);
-	return NO_BLOCK;
-  }
+  if (bp == NULL)
+	return NO_BLOCK;			/* peeking failed */
   z = rd_indir(bp, (int) excess);		/* get block pointed to */
-  put_block(bp, INDIRECT_BLOCK);		/* release single indir blk */
+  put_block(bp);				/* release single indir blk */
   if (z == NO_ZONE) return(NO_BLOCK);
   b = (block_t) ((z << scale) + boff);
   return(b);
@@ -288,13 +280,19 @@ int opportunistic;		/* if nonzero, only use cache for metadata */
 
 struct buf *get_block_map(register struct inode *rip, u64_t position)
 {
+	struct buf *bp;
+	int r, block_size;
 	block_t b = read_map(rip, position, 0);	/* get block number */
-	int block_size = get_block_size(rip->i_dev);
 	if(b == NO_BLOCK)
 		return NULL;
+	block_size = get_block_size(rip->i_dev);
 	position = rounddown(position, block_size);
 	assert(rip->i_num != VMC_NO_INODE);
-	return lmfs_get_block_ino(rip->i_dev, b, NORMAL, rip->i_num, position);
+	if ((r = lmfs_get_block_ino(&bp, rip->i_dev, b, NORMAL, rip->i_num,
+	    position)) != OK)
+		panic("MFS: error getting block (%llu,%u): %d",
+		    rip->i_dev, b, r);
+	return bp;
 }
 
 /*===========================================================================*
@@ -310,7 +308,7 @@ int index;			/* index into *bp */
   if(bp == NULL)
 	panic("rd_indir() on NULL");
 
-  sp = get_super(lmfs_dev(bp));	/* need super block to find file sys type */
+  sp = &superblock;
 
   /* read a zone from an indirect block */
   assert(sp->s_version == V3);
@@ -343,28 +341,15 @@ unsigned bytes_ahead;		/* bytes beyond position for immediate use */
  * flag on all reads to allow this.
  */
 /* Minimum number of blocks to prefetch. */
-  int nr_bufs = lmfs_nr_bufs();
-# define BLOCKS_MINIMUM		(nr_bufs < 50 ? 18 : 32)
-  int scale, read_q_size;
+# define BLOCKS_MINIMUM		32
+  int r, scale, read_q_size;
   unsigned int blocks_ahead, fragment, block_size;
   block_t block, blocks_left;
   off_t ind1_pos;
   dev_t dev;
   struct buf *bp;
-  static unsigned int readqsize = 0;
-  static struct buf **read_q;
+  static block64_t read_q[LMFS_MAX_PREFETCH];
   u64_t position_running;
-  int inuse_before = lmfs_bufs_in_use();
-
-  if(readqsize != nr_bufs) {
-	if(readqsize > 0) {
-		assert(read_q != NULL);
-		free(read_q);
-	}
-	if(!(read_q = malloc(sizeof(read_q[0])*nr_bufs)))
-		panic("couldn't allocate read_q");
-	readqsize = nr_bufs;
-  }
 
   dev = rip->i_dev;
   assert(dev != NO_DEV);
@@ -379,10 +364,11 @@ unsigned bytes_ahead;		/* bytes beyond position for immediate use */
   bytes_ahead += fragment;
   blocks_ahead = (bytes_ahead + block_size - 1) / block_size;
 
-  bp = lmfs_get_block_ino(dev, block, PREFETCH, rip->i_num, position);
-  assert(bp != NULL);
-  assert(bp->lmfs_count > 0);
-  if (lmfs_dev(bp) != NO_DEV) return(bp);
+  r = lmfs_get_block_ino(&bp, dev, block, PEEK, rip->i_num, position);
+  if (r == OK)
+	return(bp);
+  if (r != ENOENT)
+	panic("MFS: error getting block (%llu,%u): %d", dev, block, r);
 
   /* The best guess for the number of blocks to prefetch:  A lot.
    * It is impossible to tell what the device looks like, so we don't even
@@ -415,9 +401,6 @@ unsigned bytes_ahead;		/* bytes beyond position for immediate use */
 	blocks_left++;
   }
 
-  /* No more than the maximum request. */
-  if (blocks_ahead > NR_IOREQS) blocks_ahead = NR_IOREQS;
-
   /* Read at least the minimum number of blocks, but not after a seek. */
   if (blocks_ahead < BLOCKS_MINIMUM && rip->i_seek == NO_SEEK)
 	blocks_ahead = BLOCKS_MINIMUM;
@@ -425,42 +408,43 @@ unsigned bytes_ahead;		/* bytes beyond position for immediate use */
   /* Can't go past end of file. */
   if (blocks_ahead > blocks_left) blocks_ahead = blocks_left;
 
+  /* No more than the maximum request. */
+  if (blocks_ahead > LMFS_MAX_PREFETCH) blocks_ahead = LMFS_MAX_PREFETCH;
+
   read_q_size = 0;
 
   /* Acquire block buffers. */
   for (;;) {
   	block_t thisblock;
-	assert(bp->lmfs_count > 0);
-	read_q[read_q_size++] = bp;
+	read_q[read_q_size++] = block;
 
 	if (--blocks_ahead == 0) break;
-
-	/* Don't trash the cache, leave 4 free. */
-	if (lmfs_bufs_in_use() >= nr_bufs - 4) break;
 
 	block++;
 	position_running += block_size;
 
 	thisblock = read_map(rip, (off_t) ex64lo(position_running), 1);
 	if (thisblock != NO_BLOCK) {
-		bp = lmfs_get_block_ino(dev, thisblock, PREFETCH, rip->i_num,
-			position_running);
-	} else {
-		bp = get_block(dev, block, PREFETCH);
-	}
-	assert(bp);
-	assert(bp->lmfs_count > 0);
-	if (lmfs_dev(bp) != NO_DEV) {
+		r = lmfs_get_block_ino(&bp, dev, thisblock, PEEK, rip->i_num,
+		    position_running);
+		block = thisblock;
+	} else
+		r = lmfs_get_block(&bp, dev, block, PEEK);
+
+	if (r == OK) {
 		/* Oops, block already in the cache, get out. */
-		put_block(bp, FULL_DATA_BLOCK);
+		put_block(bp);
 		break;
 	}
+	if (r != ENOENT)
+		panic("MFS: error getting block (%llu,%u): %d", dev, block, r);
   }
-  lmfs_rw_scattered(dev, read_q, read_q_size, READING);
+  lmfs_prefetch(dev, read_q, read_q_size);
 
-  assert(inuse_before == lmfs_bufs_in_use());
-
-  return(lmfs_get_block_ino(dev, baseblock, NORMAL, rip->i_num, position));
+  r = lmfs_get_block_ino(&bp, dev, baseblock, NORMAL, rip->i_num, position);
+  if (r != OK)
+	panic("MFS: error getting block (%llu,%u): %d", dev, baseblock, r);
+  return bp;
 }
 
 
@@ -554,7 +538,7 @@ ssize_t fs_getdents(ino_t ino_nr, struct fsdriver_data *data, size_t bytes,
 		}
 	}
 
-	put_block(bp, DIRECTORY_BLOCK);
+	put_block(bp);
 	if (done)
 		break;
   }

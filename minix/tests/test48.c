@@ -367,7 +367,7 @@ static struct
 static void test_getaddrinfo_all(int use_network)
 {
 	int flag_PASSIVE, flag_CANONNAME, flag_NUMERICHOST, flag_NUMERICSERV;
-	int exp_results, flags, i, j, k, l, passhints;
+	int exp_results, flags, flagcount, i, j, k, l, passhints;
 	unsigned long ipaddr;
 
 	/* loop through various parameter values */
@@ -381,6 +381,11 @@ static void test_getaddrinfo_all(int use_network)
 	for (flag_NUMERICSERV = 0; flag_NUMERICSERV < 2; flag_NUMERICSERV++)
 	for (passhints = 0; passhints < 2; passhints++)
 	{
+		/* skip some redundant combinations */
+		flagcount = flag_PASSIVE + flag_CANONNAME +
+			flag_NUMERICHOST + flag_NUMERICSERV;
+		if (flagcount > 1 && flagcount < 4) continue;
+
 		/* skip tests that need but cannot use network */
 		if (!use_network && hosts[i].need_network)
 			continue;
@@ -490,7 +495,7 @@ static int buflens[] = { 0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 255 };
 static void test_getnameinfo_all(void)
 {
 	int flag_NUMERICHOST, flag_NAMEREQD, flag_NUMERICSERV, flag_DGRAM;
-	int exp_results, flags, i, j, k, l, socktypemismatch;
+	int exp_results, flagcount, flags, i, j, k, l, socktypemismatch;
 	const char *nodename, *servname;
 
 	/* set ports servent structs */
@@ -530,6 +535,13 @@ static void test_getnameinfo_all(void)
 	for (flag_NUMERICSERV = 0; flag_NUMERICSERV < 2; flag_NUMERICSERV++)
 	for (flag_DGRAM       = 0; flag_DGRAM < 2;       flag_DGRAM++)
 	{
+		/* skip some redundant combinations */
+		flagcount = flag_NUMERICHOST + flag_NAMEREQD +
+			flag_NUMERICSERV + flag_DGRAM;
+		if (flagcount > 1 && flagcount < 4) continue;
+		if (k > 1 && k < LENGTH(buflens) - 2 &&
+			l > 1 && l < LENGTH(buflens) - 2) continue;
+
 		/* determine flags */
 		flags = (flag_NUMERICHOST ? NI_NUMERICHOST : 0) |
 			(flag_NAMEREQD    ? NI_NAMEREQD : 0) |
@@ -575,29 +587,13 @@ static void test_getnameinfo_all(void)
 	}
 }
 
-static int can_use_network(void)
-{
-	const char *usenet;
-
-	/* set $USENETWORK to "yes" or "no" to indicate whether
-	 * an internet connection is to be expected; defaults to "no"
-	 */
-	usenet = getenv("USENETWORK");
-	if (!usenet || !*usenet) return 0; /* default: disable network */
-	if (strcmp(usenet, "yes") == 0) return 1; /* network enabled */
-	if (strcmp(usenet, "no") == 0) return 0; /* network disabled */
-
-	fprintf(stderr, "warning: invalid $USENETWORK value: %s\n", usenet);
-	return 0;
-}
-
 int main(void)
 {
 	int use_network;
 
 	start(48);
 
-	use_network = can_use_network();
+	use_network = get_setting_use_network();
 	test_getaddrinfo_all(use_network);
 	test_getnameinfo_all();
 

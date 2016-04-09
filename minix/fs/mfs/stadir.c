@@ -84,13 +84,13 @@ int fs_statvfs(struct statvfs *st)
 {
   struct super_block *sp;
   int scale;
-  u64_t used;
 
-  sp = get_super(fs_dev);
+  sp = &superblock;
 
   scale = sp->s_log_zone_size;
 
-  fs_blockstats(&st->f_blocks, &st->f_bfree, &used);
+  st->f_blocks = sp->s_zones;
+  st->f_bfree = sp->s_zones - used_zones;
   st->f_bavail = st->f_bfree;
 
   st->f_bsize = sp->s_block_size << scale;

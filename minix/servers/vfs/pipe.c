@@ -27,7 +27,6 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include "file.h"
-#include "scratchpad.h"
 #include <minix/vfsif.h>
 #include "vnode.h"
 #include "vmnt.h"
@@ -44,11 +43,12 @@ int do_pipe2(void)
   int fil_des[2];		/* reply goes here */
 
   flags = job_m_in.m_lc_vfs_pipe2.flags;
+  flags |= job_m_in.m_lc_vfs_pipe2.oflags;	/* backward compatibility */
 
   r = create_pipe(fil_des, flags);
   if (r == OK) {
-	job_m_out.m_lc_vfs_pipe2.fd0 = fil_des[0];
-	job_m_out.m_lc_vfs_pipe2.fd1 = fil_des[1];
+	job_m_out.m_vfs_lc_fdpair.fd0 = fil_des[0];
+	job_m_out.m_vfs_lc_fdpair.fd1 = fil_des[1];
   }
 
   return r;
@@ -325,18 +325,22 @@ void wait_for(endpoint_t who)
 /*===========================================================================*
  *				pipe_suspend				     *
  *===========================================================================*/
-void pipe_suspend(filp, buf, size)
-struct filp *filp;
-vir_bytes buf;
-size_t size;
+void pipe_suspend(struct filp * filp __unused, vir_bytes buf, size_t size)
 {
 /* Take measures to suspend the processing of the present system call.
  * Store the parameters to be used upon resuming in the process table.
  */
 
-  scratch(fp).file.filp = filp;
-  scratch(fp).io.io_buffer = buf;
-  scratch(fp).io.io_nbytes = size;
+  /* We can only get here through an I/O call, which comes with a file
+   * descriptor, and that file descriptor must therefore correspond to the
+   * target file pointer of the I/O request. The process is blocked on the I/O
+   * call, and thus, the file descriptor will remain valid. Therefore, we can,
+   * and will, use the file descriptor to get the file pointer again later.
+   */
+  assert(fp->fp_filp[fp->fp_fd] == filp);
+
+  fp->fp_io_buffer = buf;
+  fp->fp_io_nbytes = size;
   suspend(FP_BLOCKED_ON_PIPE);
 }
 
@@ -409,17 +413,13 @@ int count;			/* max number of processes to release */
 		 */
 
 		if (rp->fp_blocked_on == FP_BLOCKED_ON_POPEN ||
+		    rp->fp_blocked_on == FP_BLOCKED_ON_PIPE ||
 		    rp->fp_blocked_on == FP_BLOCKED_ON_LOCK ||
 		    rp->fp_blocked_on == FP_BLOCKED_ON_OTHER) {
-			f = rp->fp_filp[scratch(rp).file.fd_nr];
+			f = rp->fp_filp[rp->fp_fd];
 			if (f == NULL || f->filp_mode == FILP_CLOSED)
 				continue;
-			if (rp->fp_filp[scratch(rp).file.fd_nr]->filp_vno != vp)
-				continue;
-		} else if (rp->fp_blocked_on == FP_BLOCKED_ON_PIPE) {
-			if (scratch(rp).file.filp == NULL)
-				continue;
-			if (scratch(rp).file.filp->filp_vno != vp)
+			if (f->filp_vno != vp)
 				continue;
 		} else
 			continue;
@@ -459,14 +459,17 @@ void revive(endpoint_t proc_e, int returned)
    * the proc must be restarted so it can try again.
    */
   blocked_on = rfp->fp_blocked_on;
-  fd_nr = scratch(rfp).file.fd_nr;
+  fd_nr = rfp->fp_fd;
   if (blocked_on == FP_BLOCKED_ON_PIPE || blocked_on == FP_BLOCKED_ON_LOCK) {
 	/* Revive a process suspended on a pipe or lock. */
 	rfp->fp_flags |= FP_REVIVED;
 	reviving++;		/* process was waiting on pipe or lock */
   } else {
 	rfp->fp_blocked_on = FP_BLOCKED_ON_NONE;
-	scratch(rfp).file.fd_nr = 0;
+	/* TODO: we could reset rfp->fp_fd to (e.g.) -1 here, but since its
+	 * value is not always bounds checked elsewhere, this might do more
+	 * harm than good right now.
+	 */
 	if (blocked_on == FP_BLOCKED_ON_POPEN) {
 		/* process blocked in open or create */
 		replycode(proc_e, fd_nr);
@@ -476,12 +479,12 @@ void revive(endpoint_t proc_e, int returned)
 		/* Revive a process suspended on TTY or other device.
 		 * Pretend it wants only what there is.
 		 */
-		scratch(rfp).io.io_nbytes = returned;
+		rfp->fp_io_nbytes = returned;
 		/* If a grant has been issued by FS for this I/O, revoke
 		 * it again now that I/O is done.
 		 */
 		if (GRANT_VALID(rfp->fp_grant)) {
-			if(cpf_revoke(rfp->fp_grant)) {
+			if(cpf_revoke(rfp->fp_grant) == -1) {
 				panic("VFS: revoke failed for grant: %d",
 					rfp->fp_grant);
 			}
@@ -545,7 +548,7 @@ void unpause(void)
 		break;
 
 	case FP_BLOCKED_ON_OTHER:/* process trying to do device I/O (e.g. tty)*/
-		fild = scratch(fp).file.fd_nr;
+		fild = fp->fp_fd;
 		if (fild < 0 || fild >= OPEN_MAX)
 			panic("file descriptor out-of-range");
 		f = fp->fp_filp[fild];

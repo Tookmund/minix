@@ -114,17 +114,18 @@ int drv_sendrec(endpoint_t drv_e, message *reqmp)
 	if ((r = asynsend3(drv_e, self->w_drv_sendrec, AMF_NOREPLY)) == OK) {
 		/* Yield execution until we've received the reply */
 		worker_wait();
+
 	} else {
 		printf("VFS: drv_sendrec: error sending msg to driver %d: %d\n",
 			drv_e, r);
-		util_stacktrace();
+		self->w_drv_sendrec = NULL;
 	}
 
+	assert(self->w_drv_sendrec == NULL);
 	dp->dmap_servicing = INVALID_THREAD;
 	self->w_task = NONE;
-	self->w_drv_sendrec = NULL;
 	unlock_dmap(dp);
-	return(OK);
+	return(r);
 }
 
 /*===========================================================================*
@@ -141,6 +142,7 @@ int fs_sendrec(endpoint_t fs_e, message *reqmp)
   }
   if (fs_e == fp->fp_endpoint) return(EDEADLK);
 
+  assert(self->w_sendrec == NULL);
   self->w_sendrec = reqmp;	/* Where to store request and reply */
 
   /* Find out whether we can send right away or have to enqueue */
@@ -157,7 +159,12 @@ int fs_sendrec(endpoint_t fs_e, message *reqmp)
 
   worker_wait();	/* Yield execution until we've received the reply. */
 
-  return(reqmp->m_type);
+  assert(self->w_sendrec == NULL);
+
+  r = reqmp->m_type;
+  if (r == ERESTART)	/* ERESTART is used internally, so make sure it is.. */
+	r = EIO;	/* ..not delivered as a result from a file system. */
+  return(r);
 }
 
 /*===========================================================================*
@@ -170,6 +177,7 @@ int vm_sendrec(message *reqmp)
   assert(self);
   assert(reqmp);
 
+  assert(self->w_sendrec == NULL);
   self->w_sendrec = reqmp;	/* Where to store request and reply */
 
   r = sendmsg(NULL, VM_PROC_NR, self);
@@ -179,6 +187,8 @@ int vm_sendrec(message *reqmp)
   if (r != OK) return(r);
 
   worker_wait();	/* Yield execution until we've received the reply. */
+
+  assert(self->w_sendrec == NULL);
 
   return(reqmp->m_type);
 }

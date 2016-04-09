@@ -2,8 +2,7 @@
 #define __MFS_PROTO_H__
 
 /* Some shortcuts to functions in -lminixfs */
-#define get_block(d, b, t) lmfs_get_block(d, b, t)
-#define put_block(b, t) lmfs_put_block(b, t)
+#define put_block(b) lmfs_put_block(b)
 
 /* Function prototypes. */
 
@@ -16,6 +15,7 @@ struct super_block;
 /* cache.c */
 zone_t alloc_zone(dev_t dev, zone_t z);
 void free_zone(dev_t dev, zone_t numb);
+struct buf *get_block(dev_t dev, block_t block, int how);
 
 /* inode.c */
 struct inode *alloc_inode(dev_t dev, mode_t bits, uid_t uid, gid_t gid);
@@ -84,10 +84,8 @@ int fs_statvfs(struct statvfs *st);
 bit_t alloc_bit(struct super_block *sp, int map, bit_t origin);
 void free_bit(struct super_block *sp, int map, bit_t bit_returned);
 unsigned int get_block_size(dev_t dev);
-struct super_block *get_super(dev_t dev);
 int read_super(struct super_block *sp);
 int write_super(struct super_block *sp);
-u32_t get_used_blocks(struct super_block *sp);
 
 /* stats.c */
 bit_t count_free_bits(struct super_block *sp, int map);

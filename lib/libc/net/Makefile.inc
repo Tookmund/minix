@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile.inc,v 1.85 2013/10/19 19:56:56 christos Exp $
+#	$NetBSD: Makefile.inc,v 1.86 2015/04/15 19:13:46 mrg Exp $
 #	@(#)Makefile.inc	8.2 (Berkeley) 9/5/93
 
 # net sources
@@ -11,31 +11,26 @@ CPPFLAGS.setsockopt.c+= -D_MINIX_SYSTEM=1
 .endif
 .PATH: ${ARCHDIR}/net ${.CURDIR}/net
 
-# Not supported by minix: iso_addr.c link_addr.c sockatmark.c
 SRCS+=	base64.c ethers.c gethnamaddr.c getifaddrs.c \
 	getnetnamadr.c getnetent.c getpeereid.c \
 	getprotobyname.c getprotobynumber.c getprotoent.c \
 	getprotobyname_r.c getprotobynumber_r.c getprotoent_r.c \
 	getservbyname.c getservbyport.c getservent.c \
 	getservbyname_r.c getservbyport_r.c getservent_r.c \
+	iso_addr.c linkaddr.c \
 	nsdispatch.c nslexer.l nsparser.y nsap_addr.c \
 	rcmd.c recv.c send.c sethostent.c \
-#	sockatmark.c
+	sockatmark.c
 
 .if (${MKHESIOD} != "no")
 SRCS+=	hesiod.c
-.if ${HAVE_GCC:U} == "45" && ${MACHINE_CPU} == "ia64"
-COPTS.hesiod.c+=	${${ACTIVE_CC} == "gcc" :? -O1 :}
-.endif
 .endif
 
 SRCS+=	getaddrinfo.c getnameinfo.c
 .if (${USE_INET6} != "no")
 SRCS+=	ip6opt.c rthdr.c vars6.c inet6_scopeid.c
 .endif
-.if !defined(__MINIX)
 SRCS+=	if_indextoname.c if_nameindex.c if_nametoindex.c
-.endif
 
 LPREFIX=_nsyy
 YPREFIX=_nsyy
@@ -52,15 +47,6 @@ nslexer.c: nslexer.l nsparser.h
 #	htonl() htons() ntohl() ntohs()
 
 .include "${ARCHDIR}/net/Makefile.inc"
-
-.if ${HAVE_GCC:U} == "45" && ${MACHINE_CPU} == "arm"
-COPTS.getaddrinfo.c+=	${${ACTIVE_CC} == "gcc" :? -fno-tree-ter :}
-COPTS.gethnamaddr.c+=	${${ACTIVE_CC} == "gcc" :? -fno-tree-ter :}
-.endif
-
-.if defined(__MINIX)
-COPTS.gethnamaddr.c+=	${${CC} == "gcc" :? -std=c99 :}
-.endif # defined(__MINIX)
 
 MAN+=	byteorder.3 ethers.3 gethostbyname.3 getifaddrs.3 \
 	getnetent.3 getprotoent.3 getpeereid.3 \

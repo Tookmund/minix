@@ -6,7 +6,6 @@
  * The entry points into this file are
  *   alloc_bit:       somebody wants to allocate a zone or inode; find one
  *   free_bit:        indicate that a zone or inode is available for allocation
- *   get_super:       search the 'superblock' table for a device
  *   mounted:         tells if file inode is on mounted (or ROOT) file system
  *   read_super:      read a superblock
  */
@@ -23,8 +22,6 @@
 #include "inode.h"
 #include "super.h"
 #include "const.h"
-
-static u32_t used_blocks = 0;
 
 /*===========================================================================*
  *				alloc_bit				     *
@@ -93,14 +90,14 @@ bit_t origin;			/* number of bit to start searching at */
 		k |= 1 << i;
 		*wptr = (bitchunk_t) conv4(sp->s_native, (int) k);
 		MARKDIRTY(bp);
-		put_block(bp, MAP_BLOCK);
+		put_block(bp);
 		if(map == ZMAP) {
-			used_blocks++;
-			lmfs_blockschange(sp->s_dev, 1);
+			used_zones++;
+			lmfs_change_blockusage(1);
 		}
 		return(b);
 	}
-	put_block(bp, MAP_BLOCK);
+	put_block(bp);
 	if (++block >= (unsigned int) bit_blocks) /* last block, wrap around */
 		block = 0;
 	word = 0;
@@ -150,30 +147,13 @@ bit_t bit_returned;		/* number of bit to insert into the map */
   b_bitmap(bp)[word] = (bitchunk_t) conv4(sp->s_native, (int) k);
   MARKDIRTY(bp);
 
-  put_block(bp, MAP_BLOCK);
+  put_block(bp);
 
   if(map == ZMAP) {
-	used_blocks--;
-	lmfs_blockschange(sp->s_dev, -1);
+	used_zones--;
+	lmfs_change_blockusage(-1);
   }
 }
-
-/*===========================================================================*
- *				get_super				     *
- *===========================================================================*/
-struct super_block *get_super(
-  dev_t dev			/* device number whose super_block is sought */
-)
-{
-  if (dev == NO_DEV)
-  	panic("request for super_block of NO_DEV");
-
-  if(superblock.s_dev != dev)
-  	panic("wrong superblock: 0x%x", (int) dev);
-
-  return(&superblock);
-}
-
 
 /*===========================================================================*
  *				get_block_size				     *
@@ -238,7 +218,7 @@ static int rw_super(struct super_block *sp, int writing)
   	sp->s_dev = save_dev;
   }
 
-  put_block(bp, FULL_DATA_BLOCK);
+  put_block(bp);
   lmfs_flushall();
 
   return OK;
@@ -280,6 +260,14 @@ int read_super(struct super_block *sp)
   sp->s_log_zone_size =     (short) conv2(native, (int) sp->s_log_zone_size);
   sp->s_max_size =          (off_t) conv4(native, sp->s_max_size);
   sp->s_zones =             (zone_t)conv4(native, sp->s_zones);
+
+  /* Zones consisting of multiple blocks are longer supported, so fail as early
+   * as possible. There is still a lot of code cleanup to do here, though.
+   */
+  if (sp->s_log_zone_size != 0) {
+	printf("MFS: block and zone sizes are different\n");
+	return EINVAL;
+  }
 
   /* Calculate some other numbers that depend on the version here too, to
    * hide some of the differences.
@@ -363,16 +351,4 @@ int write_super(struct super_block *sp)
   if(sp->s_rd_only)
   	panic("can't write superblock of readonly filesystem");
   return rw_super(sp, 1);
-}
-
-static int blocks_known = 0;
-
-u32_t get_used_blocks(struct super_block *sp)
-{
-	if(!blocks_known)  {
-		/* how many blocks are in use? */
-		used_blocks = sp->s_zones - count_free_bits(sp, ZMAP);
-		blocks_known = 1;
-	}
-	return used_blocks;
 }

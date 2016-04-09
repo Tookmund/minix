@@ -32,7 +32,7 @@ int fl;
   int i, r, src_ind, dst_ind;
   unsigned flags;
   static int inside = 0;
-  int len, needack = 0;
+  int needack = 0;
 
   /* Debug printf() causes asynchronous sends? */
   if (inside)	/* Panic will not work either then, so exit */
@@ -126,18 +126,31 @@ int fl;
   fl |= AMF_VALID;	/* Mark in use */
   msgtable[next_slot].dst = dst;
   msgtable[next_slot].msg = *mp;
+  __insn_barrier();
   msgtable[next_slot].flags = fl;		/* Has to be last. The kernel 
 					 	 * scans this table while we
 						 * are sleeping.
 					 	 */
   next_slot++;
 
+  /* Reload. */
+  inside = 0;
+  r = senda_reload();
+
+  return r;
+}
+
+/*===========================================================================*
+ *				senda_reload				     *
+ *===========================================================================*/
+int senda_reload()
+{
+  int len;
+
   assert(next_slot >= first_slot);
   len = next_slot - first_slot;
   assert(first_slot + len <= ASYN_NR);
   assert(len >= 0);
-
-  inside = 0;
 
   /* Tell the kernel to rescan the table */
   return ipc_senda(&msgtable[first_slot], len);
